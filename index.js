@@ -38,7 +38,7 @@ async function run() {
     const JobCollection = database.collection("jobs");
     
 
-    app.post("/jobs", async (req, res) =>{
+    app.post("/api/jobs", async (req, res) =>{
         const job = req.body;
         const result = await JobCollection.insertOne(job);
         res.send(result);
