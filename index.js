@@ -37,6 +37,23 @@ async function run() {
     const database = client.db("role");
     const JobCollection = database.collection("jobs");
     
+   app.get("/api/jobs", async (req, res) => {
+  const query = {};
+
+  if (req.query.companyId) {
+    query["company.id"] = req.query.companyId;
+  }
+
+  if (req.query.status) {
+    query.status = req.query.status;
+  }
+
+  const cursor = await JobCollection.find(query);
+
+    const result = await cursor.toArray();
+
+  res.send(result);
+});
 
     app.post("/api/jobs", async (req, res) =>{
         const job = req.body;
