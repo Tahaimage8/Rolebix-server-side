@@ -34,9 +34,9 @@ async function run() {
     await client.connect();
 
 
-    const database = client.db("role");
-    const JobCollection = database.collection("jobs");
-    
+    const db = client.db("role");
+    const JobCollection = db.collection("jobs");
+    const companyCollection = db.collection("companies");
    app.get("/api/jobs", async (req, res) => {
   const query = {};
 
@@ -62,6 +62,20 @@ async function run() {
     })
 
 
+    // companies
+    app.get('/api/my/companies', async (req, res) =>{
+      const query = {};
+      if(req.query.recruiterId){
+        query.recruiterId = req.query.recruiterId;
+      }
+      const result = await companyCollection.find(query).toArray();
+      res.send(result);
+    })
+    app.post('/api/companies', async (req, res) =>{
+      const company = req.body;
+      const result = await companyCollection.insertOne(company);
+      res.send(result);
+    })
 
 
 
