@@ -35,6 +35,28 @@ async function run() {
     const db = client.db("role");
     const JobCollection = db.collection("jobs");
     const companyCollection = db.collection("companies");
+    const userCollection = db.collection("user");
+    const applicationCollection = db.collection("applications");
+
+    // application related apis
+
+    app.post("/api/applications", async (req, res) => {
+      const application = req.body;
+      const newApplication = {
+        ...application,
+        createdAt: new Date(),
+      };
+      const result = await applicationCollection.insertOne(newApplication);
+      res.send(result);
+    });
+
+    // user
+    app.get("/api/users", async (req, res) => {
+      const cursor = await userCollection.find();
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
     app.get("/api/jobs", async (req, res) => {
       const query = {};
 
@@ -53,14 +75,14 @@ async function run() {
       res.send(result);
     });
 
-    app.get('/api/jobs/:id', async (req, res) => {
+    app.get("/api/jobs/:id", async (req, res) => {
       const id = req.params.id;
       const query = {
-        _id : new ObjectId(id)
-      }
+        _id: new ObjectId(id),
+      };
       const result = await JobCollection.findOne(query);
       res.send(result);
-    })
+    });
 
     app.post("/api/jobs", async (req, res) => {
       const job = req.body;
@@ -77,8 +99,7 @@ async function run() {
       const cursor = await companyCollection.find().skip(1);
       const result = await cursor.toArray();
       res.send(result);
-    })
-
+    });
 
     app.get("/api/my/companies", async (req, res) => {
       const query = {};
