@@ -40,6 +40,32 @@ async function run() {
 
     // application related apis
 
+app.get("/api/applications", async (req, res) => {
+  try {
+    const query = {};
+
+    if (req.query.applicantId) {
+      query.applicantId = req.query.applicantId;
+    }
+
+    if (req.query.jobId) {
+      query.jobId = req.query.jobId;
+    }
+
+
+    const result = await applicationCollection
+      .find(query)
+      .toArray();
+
+    res.json(result);
+  } catch (error) {
+    console.error("Applications fetch error:", error);
+
+    res.status(500).json({
+      message: "Failed to fetch applications.",
+    });
+  }
+});
     app.post("/api/applications", async (req, res) => {
       const application = req.body;
       const newApplication = {
