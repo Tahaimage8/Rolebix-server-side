@@ -37,6 +37,122 @@ async function run() {
     const companyCollection = db.collection("companies");
     const userCollection = db.collection("user");
     const applicationCollection = db.collection("applications");
+    const planCollection = db.collection("plans")
+    const subscriptionCollection = db.collection("subscription")
+  
+  // subscription 
+
+ app.post("/api/subscription", async (req, res) => {
+  try {
+    const data = req.body;
+
+    if (!data?.email) {
+      return res.status(400).json({
+        message: "Email is required.",
+      });
+    }
+
+    if (!data?.planId) {
+      return res.status(400).json({
+        message: "Plan ID is required.",
+      });
+    }
+
+    const subsInfo = {
+      ...data,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await subscriptionCollection.updateOne(
+      { stripeSessionId: data.stripeSessionId },
+      {
+        $set: subsInfo,
+      },
+      {
+        upsert: true,
+      }
+    );
+
+    await userCollection.updateOne(
+      { email: data.email },
+      {
+        $set: {
+          plan: data.planId,
+          subscription: {
+            planId: data.planId,
+            planName: data.planName,
+            stripeSessionId: data.stripeSessionId,
+            stripeCustomerId: data.stripeCustomerId,
+            stripeSubscriptionId: data.stripeSubscriptionId,
+            paymentStatus: data.paymentStatus,
+            amountTotal: data.amountTotal,
+            currency: data.currency,
+            updatedAt: new Date(),
+          },
+        },
+      }
+    );
+
+    res.json({
+      success: true,
+      message: "Subscription saved successfully.",
+      result,
+    });
+  } catch (error) {
+    console.error("Subscription create error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to save subscription.",
+    });
+  }
+});
+  
+    // plans
+
+app.get("/api/plans", async (req, res) => {
+  try {
+    const planId = req.query.plan_id
+      ? String(req.query.plan_id).toLowerCase()
+      : "";
+
+    const plansDoc = await planCollection.findOne({});
+
+    if (!plansDoc) {
+      return res.status(404).json({
+        message: "Plans document not found",
+      });
+    }
+
+    const allPlans = [
+      ...(plansDoc.seekerPlans || []),
+      ...(plansDoc.recruiterPlans || []),
+    ];
+
+    if (!planId) {
+      return res.json(allPlans);
+    }
+
+    const plan = allPlans.find(
+      (singlePlan) => String(singlePlan.id).toLowerCase() === planId
+    );
+
+    if (!plan) {
+      return res.status(404).json({
+        message: "Plan not found",
+      });
+    }
+
+    res.json(plan);
+  } catch (error) {
+    console.error("Plan fetch error:", error);
+
+    res.status(500).json({
+      message: "Failed to fetch plan.",
+    });
+  }
+});
 
     // application related apis
 
@@ -122,7 +238,7 @@ app.get("/api/applications", async (req, res) => {
 
     // companies
     app.get("/api/companies", async (req, res) => {
-      const cursor = await companyCollection.find().skip(1);
+      const cursor = await companyCollection.find();
       const result = await cursor.toArray();
       res.send(result);
     });
@@ -143,6 +259,35 @@ app.get("/api/applications", async (req, res) => {
       const result = await companyCollection.insertOne(company);
       res.send(result);
     });
+
+app.patch("/api/companies/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const updatedCompany = req.body;
+
+    const filter = {
+      _id: new ObjectId(id),
+    };
+
+    const updatedDoc = {
+      $set: {
+        status: updatedCompany.status,
+        updatedAt: new Date(),
+      },
+    };
+
+    const result = await companyCollection.updateOne(filter, updatedDoc);
+
+    res.json(result);
+  } catch (error) {
+    console.error("Company update error:", error);
+
+    res.status(500).json({
+      message: "Failed to update company.",
+      error: error.message,
+    });
+  }
+});
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
