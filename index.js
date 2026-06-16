@@ -16,27 +16,10 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-const logger = (req,res, next)=>{
-  console.log("logger log", req.params)
-  next()
-}
-const verifyToken = (req,res,next)=>{
-  console.log("headers", req.headers)
-  const authHeader = req.headers?.authorization
-  if(!authHeader){
-    return res.status(401).send({ message : "unauthorized access"})
-  }
-
-  const token = authHeader.split(" ")[1]
-
-  if(!token){
-    return res.status(401).send({ message : "unauthorized access"})
-  }
-
-  next()
-}
-
-
+const logger = (req, res, next) => {
+  console.log("logger log", req.params);
+  next();
+};
 
 const uri = process.env.MONGODB_URI;
 
@@ -59,151 +42,196 @@ async function run() {
     const companyCollection = db.collection("companies");
     const userCollection = db.collection("user");
     const applicationCollection = db.collection("applications");
-    const planCollection = db.collection("plans")
-    const subscriptionCollection = db.collection("subscription")
-  
-  // subscription 
+    const planCollection = db.collection("plans");
+    const subscriptionCollection = db.collection("subscription");
+    const sessionCollection = db.collection("session");
 
- app.post("/api/subscription", async (req, res) => {
-  try {
-    const data = req.body;
+    // verification related
+    const verifyToken = async (req, res, next) => {
+      console.log("headers", req.headers);
+      const authHeader = req.headers?.authorization;
+      if (!authHeader) {
+        return res.status(401).send({ message: "unauthorized access" });
+      }
 
-    if (!data?.email) {
-      return res.status(400).json({
-        message: "Email is required.",
-      });
-    }
+      const token = authHeader.split(" ")[1];
+      const query = { token: token };
+      const session = await sessionCollection.findOne(query);
+      console.log(session);
+      const userId = session?.userId;
 
-    if (!data?.planId) {
-      return res.status(400).json({
-        message: "Plan ID is required.",
-      });
-    }
-
-    const subsInfo = {
-      ...data,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      const userQuery = {
+        _id: userId,
+      };
+      const user = await userCollection.findOne(userQuery);
+      console.log("user", user);
+      if (!token) {
+        return res.status(401).send({ message: "unauthorized access" });
+      }
+      req.user = user;
+      next();
     };
-
-    const result = await subscriptionCollection.updateOne(
-      { stripeSessionId: data.stripeSessionId },
-      {
-        $set: subsInfo,
-      },
-      {
-        upsert: true,
+    const verifySeeker = async (req, res, next) => {
+      if (req.user?.role !== "seeker") {
+        return res.status(403).send({ message: "forbidden access" });
       }
-    );
+      next();
+    };
+    const verifyAdmin = async (req, res, next) => {
+      if (req?.user?.role !== "admin") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
+    // subscription
 
-    await userCollection.updateOne(
-      { email: data.email },
-      {
-        $set: {
-          plan: data.planId,
-          subscription: {
-            planId: data.planId,
-            planName: data.planName,
-            stripeSessionId: data.stripeSessionId,
-            stripeCustomerId: data.stripeCustomerId,
-            stripeSubscriptionId: data.stripeSubscriptionId,
-            paymentStatus: data.paymentStatus,
-            amountTotal: data.amountTotal,
-            currency: data.currency,
-            updatedAt: new Date(),
+    app.post("/api/subscription", async (req, res) => {
+      try {
+        const data = req.body;
+
+        if (!data?.email) {
+          return res.status(400).json({
+            message: "Email is required.",
+          });
+        }
+
+        if (!data?.planId) {
+          return res.status(400).json({
+            message: "Plan ID is required.",
+          });
+        }
+
+        const subsInfo = {
+          ...data,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        const result = await subscriptionCollection.updateOne(
+          { stripeSessionId: data.stripeSessionId },
+          {
+            $set: subsInfo,
           },
-        },
+          {
+            upsert: true,
+          },
+        );
+
+        await userCollection.updateOne(
+          { email: data.email },
+          {
+            $set: {
+              plan: data.planId,
+              subscription: {
+                planId: data.planId,
+                planName: data.planName,
+                stripeSessionId: data.stripeSessionId,
+                stripeCustomerId: data.stripeCustomerId,
+                stripeSubscriptionId: data.stripeSubscriptionId,
+                paymentStatus: data.paymentStatus,
+                amountTotal: data.amountTotal,
+                currency: data.currency,
+                updatedAt: new Date(),
+              },
+            },
+          },
+        );
+
+        res.json({
+          success: true,
+          message: "Subscription saved successfully.",
+          result,
+        });
+      } catch (error) {
+        console.error("Subscription create error:", error);
+
+        res.status(500).json({
+          success: false,
+          message: "Failed to save subscription.",
+        });
       }
-    );
-
-    res.json({
-      success: true,
-      message: "Subscription saved successfully.",
-      result,
     });
-  } catch (error) {
-    console.error("Subscription create error:", error);
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to save subscription.",
-    });
-  }
-});
-  
     // plans
 
-app.get("/api/plans", async (req, res) => {
-  try {
-    const planId = req.query.plan_id
-      ? String(req.query.plan_id).toLowerCase()
-      : "";
+    app.get("/api/plans", async (req, res) => {
+      try {
+        const planId = req.query.plan_id
+          ? String(req.query.plan_id).toLowerCase()
+          : "";
 
-    const plansDoc = await planCollection.findOne({});
+        const plansDoc = await planCollection.findOne({});
 
-    if (!plansDoc) {
-      return res.status(404).json({
-        message: "Plans document not found",
-      });
-    }
+        if (!plansDoc) {
+          return res.status(404).json({
+            message: "Plans document not found",
+          });
+        }
 
-    const allPlans = [
-      ...(plansDoc.seekerPlans || []),
-      ...(plansDoc.recruiterPlans || []),
-    ];
+        const allPlans = [
+          ...(plansDoc.seekerPlans || []),
+          ...(plansDoc.recruiterPlans || []),
+        ];
 
-    if (!planId) {
-      return res.json(allPlans);
-    }
+        if (!planId) {
+          return res.json(allPlans);
+        }
 
-    const plan = allPlans.find(
-      (singlePlan) => String(singlePlan.id).toLowerCase() === planId
-    );
+        const plan = allPlans.find(
+          (singlePlan) => String(singlePlan.id).toLowerCase() === planId,
+        );
 
-    if (!plan) {
-      return res.status(404).json({
-        message: "Plan not found",
-      });
-    }
+        if (!plan) {
+          return res.status(404).json({
+            message: "Plan not found",
+          });
+        }
 
-    res.json(plan);
-  } catch (error) {
-    console.error("Plan fetch error:", error);
+        res.json(plan);
+      } catch (error) {
+        console.error("Plan fetch error:", error);
 
-    res.status(500).json({
-      message: "Failed to fetch plan.",
+        res.status(500).json({
+          message: "Failed to fetch plan.",
+        });
+      }
     });
-  }
-});
 
     // application related apis
 
-app.get("/api/applications", async (req, res) => {
-  try {
-    const query = {};
+    app.get(
+      "/api/applications",
+      verifyToken,
+      verifySeeker,
+      async (req, res) => {
+        try {
+          const query = {};
 
-    if (req.query.applicantId) {
-      query.applicantId = req.query.applicantId;
-    }
+          if (req.query.applicantId) {
+            query.applicantId = req.query.applicantId;
 
-    if (req.query.jobId) {
-      query.jobId = req.query.jobId;
-    }
+            console.log(req.user, req.query.applicantId);
+            if (req.user._id.toString() !== req.query.applicantId) {
+              return res.status(403).send({ message: "forbidden" });
+            }
+          }
 
+          if (req.query.jobId) {
+            query.jobId = req.query.jobId;
+          }
 
-    const result = await applicationCollection
-      .find(query)
-      .toArray();
+          const result = await applicationCollection.find(query).toArray();
 
-    res.json(result);
-  } catch (error) {
-    console.error("Applications fetch error:", error);
+          res.json(result);
+        } catch (error) {
+          console.error("Applications fetch error:", error);
 
-    res.status(500).json({
-      message: "Failed to fetch applications.",
-    });
-  }
-});
+          res.status(500).json({
+            message: "Failed to fetch applications.",
+          });
+        }
+      },
+    );
     app.post("/api/applications", async (req, res) => {
       const application = req.body;
       const newApplication = {
@@ -260,89 +288,86 @@ app.get("/api/applications", async (req, res) => {
 
     // companies
 
-
-
     // app.get("/api/companies", async (req, res) => {
     //   const cursor = await companyCollection.find();
     //   const result = await cursor.toArray();
     //   res.send(result);
     // });
-//    app.get("/api/companies", async (req, res) => {
-//   try {
-//     const companies = await companyCollection.find().toArray();
+    //    app.get("/api/companies", async (req, res) => {
+    //   try {
+    //     const companies = await companyCollection.find().toArray();
 
-//     for (const company of companies) {
-//       const filter = {
-//         "company.id": company._id.toString(),
-//       };
+    //     for (const company of companies) {
+    //       const filter = {
+    //         "company.id": company._id.toString(),
+    //       };
 
-//       const jobCount = await JobCollection.countDocuments(filter);
+    //       const jobCount = await JobCollection.countDocuments(filter);
 
-//       company.jobCount = jobCount;
-//     }
+    //       company.jobCount = jobCount;
+    //     }
 
-//     res.send(companies);
-//   } catch (error) {
-//     console.error("Companies fetch error:", error);
+    //     res.send(companies);
+    //   } catch (error) {
+    //     console.error("Companies fetch error:", error);
 
-//     res.status(500).json({
-//       message: "Failed to fetch companies.",
-//     });
-//   }
-// });
+    //     res.status(500).json({
+    //       message: "Failed to fetch companies.",
+    //     });
+    //   }
+    // });
 
+    app.get("/api/companies", verifyToken, async (req, res) => {
+      try {
+        const companies = await companyCollection.find().toArray();
 
-app.get("/api/companies",logger ,verifyToken,async (req, res) => {
-  try {
-    const companies = await companyCollection.find().toArray();
+        for (const company of companies) {
+          const filter = {
+            "company.id": company._id.toString(),
+          };
 
-    for (const company of companies) {
-      const filter = {
-        "company.id": company._id.toString(),
-      };
+          const jobCount = await JobCollection.countDocuments(filter);
 
-      const jobCount = await JobCollection.countDocuments(filter);
+          company.jobCount = jobCount;
+        }
 
-      company.jobCount = jobCount;
-    }
+        res.send(companies);
+      } catch (error) {
+        console.error("Companies fetch error:", error);
 
-    res.send(companies);
-  } catch (error) {
-    console.error("Companies fetch error:", error);
-
-    res.status(500).json({
-      message: "Failed to fetch companies.",
+        res.status(500).json({
+          message: "Failed to fetch companies.",
+        });
+      }
     });
-  }
-});
-// --------------
-        app.get('/api/stats', async (req, res) => {
-            const pipeline = [
-                {
-                    $group: {
-                        _id: '$jobType',
-                        count: {
-                            $sum: 1
-                        }
-                    }
-                },
-                {
-                    $project: {
-                        jobType: '$_id',
-                        _id: 0,
-                        count: 1
-                    }
-                },
-                {
-                    $sort: { count: 1 }
-                }
-            ]
+    // --------------
+    app.get("/api/stats", async (req, res) => {
+      const pipeline = [
+        {
+          $group: {
+            _id: "$jobType",
+            count: {
+              $sum: 1,
+            },
+          },
+        },
+        {
+          $project: {
+            jobType: "$_id",
+            _id: 0,
+            count: 1,
+          },
+        },
+        {
+          $sort: { count: 1 },
+        },
+      ];
 
-            const cursor = jobCollection.aggregate(pipeline);
-            const result = await cursor.toArray();
-            res.send(result);
-        })
-// -------------
+      const cursor = jobCollection.aggregate(pipeline);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+    // -------------
 
     app.get("/api/my/companies", async (req, res) => {
       const query = {};
@@ -361,34 +386,34 @@ app.get("/api/companies",logger ,verifyToken,async (req, res) => {
       res.send(result);
     });
 
-app.patch("/api/companies/:id", logger, verifyToken ,async (req, res) => {
-  try {
-    const id = req.params.id;
-    const updatedCompany = req.body;
+    app.patch("/api/companies/:id",  verifyToken,verifyAdmin, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updatedCompany = req.body;
 
-    const filter = {
-      _id: new ObjectId(id), 
-    };
+        const filter = {
+          _id: new ObjectId(id),
+        };
 
-    const updatedDoc = {
-      $set: {
-        status: updatedCompany.status,
-        updatedAt: new Date(),
-      },
-    };
+        const updatedDoc = {
+          $set: {
+            status: updatedCompany.status,
+            updatedAt: new Date(),
+          },
+        };
 
-    const result = await companyCollection.updateOne(filter, updatedDoc);
+        const result = await companyCollection.updateOne(filter, updatedDoc);
 
-    res.json(result);
-  } catch (error) {
-    console.error("Company update error:", error);
+        res.json(result);
+      } catch (error) {
+        console.error("Company update error:", error);
 
-    res.status(500).json({
-      message: "Failed to update company.",
-      error: error.message,
+        res.status(500).json({
+          message: "Failed to update company.",
+          error: error.message,
+        });
+      }
     });
-  }
-});
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
