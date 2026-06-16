@@ -16,6 +16,28 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
+const logger = (req,res, next)=>{
+  console.log("logger log", req.params)
+  next()
+}
+const verifyToken = (req,res,next)=>{
+  console.log("headers", req.headers)
+  const authHeader = req.headers?.authorization
+  if(!authHeader){
+    return res.status(401).send({ message : "unauthorized access"})
+  }
+
+  const token = authHeader.split(" ")[1]
+
+  if(!token){
+    return res.status(401).send({ message : "unauthorized access"})
+  }
+
+  next()
+}
+
+
+
 const uri = process.env.MONGODB_URI;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -237,11 +259,90 @@ app.get("/api/applications", async (req, res) => {
     });
 
     // companies
-    app.get("/api/companies", async (req, res) => {
-      const cursor = await companyCollection.find();
-      const result = await cursor.toArray();
-      res.send(result);
+
+
+
+    // app.get("/api/companies", async (req, res) => {
+    //   const cursor = await companyCollection.find();
+    //   const result = await cursor.toArray();
+    //   res.send(result);
+    // });
+//    app.get("/api/companies", async (req, res) => {
+//   try {
+//     const companies = await companyCollection.find().toArray();
+
+//     for (const company of companies) {
+//       const filter = {
+//         "company.id": company._id.toString(),
+//       };
+
+//       const jobCount = await JobCollection.countDocuments(filter);
+
+//       company.jobCount = jobCount;
+//     }
+
+//     res.send(companies);
+//   } catch (error) {
+//     console.error("Companies fetch error:", error);
+
+//     res.status(500).json({
+//       message: "Failed to fetch companies.",
+//     });
+//   }
+// });
+
+
+app.get("/api/companies",logger ,verifyToken,async (req, res) => {
+  try {
+    const companies = await companyCollection.find().toArray();
+
+    for (const company of companies) {
+      const filter = {
+        "company.id": company._id.toString(),
+      };
+
+      const jobCount = await JobCollection.countDocuments(filter);
+
+      company.jobCount = jobCount;
+    }
+
+    res.send(companies);
+  } catch (error) {
+    console.error("Companies fetch error:", error);
+
+    res.status(500).json({
+      message: "Failed to fetch companies.",
     });
+  }
+});
+// --------------
+        app.get('/api/stats', async (req, res) => {
+            const pipeline = [
+                {
+                    $group: {
+                        _id: '$jobType',
+                        count: {
+                            $sum: 1
+                        }
+                    }
+                },
+                {
+                    $project: {
+                        jobType: '$_id',
+                        _id: 0,
+                        count: 1
+                    }
+                },
+                {
+                    $sort: { count: 1 }
+                }
+            ]
+
+            const cursor = jobCollection.aggregate(pipeline);
+            const result = await cursor.toArray();
+            res.send(result);
+        })
+// -------------
 
     app.get("/api/my/companies", async (req, res) => {
       const query = {};
@@ -260,13 +361,13 @@ app.get("/api/applications", async (req, res) => {
       res.send(result);
     });
 
-app.patch("/api/companies/:id", async (req, res) => {
+app.patch("/api/companies/:id", logger, verifyToken ,async (req, res) => {
   try {
     const id = req.params.id;
     const updatedCompany = req.body;
 
     const filter = {
-      _id: new ObjectId(id),
+      _id: new ObjectId(id), 
     };
 
     const updatedDoc = {
