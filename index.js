@@ -57,6 +57,9 @@ async function run() {
       const token = authHeader.split(" ")[1];
       const query = { token: token };
       const session = await sessionCollection.findOne(query);
+      if (!session) {
+        return res.status(401).send({ message: "unauthorized access" });
+      }
       console.log(session);
       const userId = session?.userId;
 
@@ -243,11 +246,11 @@ async function run() {
     });
 
     // user
-    app.get("/api/users", async (req, res) => {
-      const cursor = await userCollection.find();
-      const result = await cursor.toArray();
-      res.send(result);
-    });
+    // app.get("/api/users", async (req, res) => {
+    //   const cursor = await userCollection.find();
+    //   const result = await cursor.toArray();
+    //   res.send(result);
+    // });
 
     app.get("/api/jobs", async (req, res) => {
       const query = {};
@@ -386,34 +389,39 @@ async function run() {
       res.send(result);
     });
 
-    app.patch("/api/companies/:id",  verifyToken,verifyAdmin, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const updatedCompany = req.body;
+    app.patch(
+      "/api/companies/:id",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const updatedCompany = req.body;
 
-        const filter = {
-          _id: new ObjectId(id),
-        };
+          const filter = {
+            _id: new ObjectId(id),
+          };
 
-        const updatedDoc = {
-          $set: {
-            status: updatedCompany.status,
-            updatedAt: new Date(),
-          },
-        };
+          const updatedDoc = {
+            $set: {
+              status: updatedCompany.status,
+              updatedAt: new Date(),
+            },
+          };
 
-        const result = await companyCollection.updateOne(filter, updatedDoc);
+          const result = await companyCollection.updateOne(filter, updatedDoc);
 
-        res.json(result);
-      } catch (error) {
-        console.error("Company update error:", error);
+          res.json(result);
+        } catch (error) {
+          console.error("Company update error:", error);
 
-        res.status(500).json({
-          message: "Failed to update company.",
-          error: error.message,
-        });
-      }
-    });
+          res.status(500).json({
+            message: "Failed to update company.",
+            error: error.message,
+          });
+        }
+      },
+    );
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
