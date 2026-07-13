@@ -151,8 +151,11 @@ async function run() {
     const normalizeApplicationStatus = (status) => {
       const value = String(status || "applied").toLowerCase();
 
-      if (value === "new") return "applied";
+      if (value === "new" || value === "pending") return "applied";
+      if (value === "approved") return "shortlisted";
+      if (value === "accepted") return "hired";
       if (value === "interviewing") return "interview";
+      if (value === "cancelled") return "rejected";
 
       return APPLICATION_STATUSES.includes(value) ? value : "applied";
     };
@@ -202,6 +205,85 @@ async function run() {
       return JobCollection.findOne({
         $or: possibleIds.map((id) => ({ _id: id })),
       });
+    };
+
+    const seekerOwnsApplication = (application, user) => {
+      const userId = String(user?._id || "");
+      const userEmail = String(user?.email || "").toLowerCase();
+
+      const applicantId = String(
+        application?.applicantId ||
+          application?.userId ||
+          application?.applicant?._id ||
+          application?.applicant?.id ||
+          "",
+      );
+
+      const applicantEmail = String(
+        application?.applicantEmail ||
+          application?.email ||
+          application?.applicant?.email ||
+          "",
+      ).toLowerCase();
+
+      return (
+        applicantId === userId ||
+        (Boolean(userEmail) && applicantEmail === userEmail)
+      );
+    };
+
+    const enrichSeekerApplication = async (application) => {
+      const jobId =
+        application?.jobId ||
+        application?.job?._id ||
+        application?.job?.id;
+
+      const job = await findJobByAnyId(jobId);
+
+      return {
+        ...application,
+        status: normalizeApplicationStatus(application?.status),
+        job: job
+          ? {
+              _id: job._id,
+              title: job.title,
+              category: job.category,
+              type: job.type,
+              experienceLevel: job.experienceLevel,
+              location: job.location,
+              company: job.company,
+              salary: job.salary,
+              skills: job.skills,
+              status: job.status,
+            }
+          : application?.job || null,
+        jobTitle:
+          application?.jobTitle ||
+          application?.position ||
+          job?.title ||
+          "",
+        jobCategory:
+          application?.jobCategory ||
+          job?.category ||
+          "",
+        jobType:
+          application?.jobType ||
+          job?.type ||
+          "",
+        companyId:
+          application?.companyId ||
+          job?.company?.id ||
+          "",
+        companyName:
+          application?.companyName ||
+          job?.company?.name ||
+          "",
+        companyLocation:
+          application?.companyLocation ||
+          job?.location?.display ||
+          job?.location?.city ||
+          "",
+      };
     };
 
     // subscription
@@ -323,7 +405,7 @@ async function run() {
     });
 
 
-    // applications: seeker list
+    // applications: seeker list with current job information
     app.get("/api/applications", verifyToken, verifySeeker, async (req, res) => {
       try {
         const ownApplicantId = String(req.user._id);
@@ -354,17 +436,16 @@ async function run() {
           };
         }
 
-        const result = await applicationCollection
+        const applications = await applicationCollection
           .find(query)
           .sort({ createdAt: -1 })
           .toArray();
 
-        res.json(
-          result.map((application) => ({
-            ...application,
-            status: normalizeApplicationStatus(application.status),
-          })),
+        const enrichedApplications = await Promise.all(
+          applications.map(enrichSeekerApplication),
         );
+
+        res.json(enrichedApplications);
       } catch (error) {
         console.error("Applications fetch error:", error);
 
@@ -374,6 +455,52 @@ async function run() {
         });
       }
     });
+
+    // applications: seeker can view only one of their own applications
+    app.get(
+      "/api/applications/:id",
+      verifyToken,
+      verifySeeker,
+      async (req, res) => {
+        try {
+          const applicationId = req.params.id;
+
+          if (!ObjectId.isValid(applicationId)) {
+            return res.status(400).json({
+              message: "Invalid application ID.",
+            });
+          }
+
+          const application = await applicationCollection.findOne({
+            _id: new ObjectId(applicationId),
+          });
+
+          if (!application) {
+            return res.status(404).json({
+              message: "Application was not found.",
+            });
+          }
+
+          if (!seekerOwnsApplication(application, req.user)) {
+            return res.status(403).json({
+              message: "You cannot view this application.",
+            });
+          }
+
+          const enrichedApplication =
+            await enrichSeekerApplication(application);
+
+          res.json(enrichedApplication);
+        } catch (error) {
+          console.error("Application details fetch error:", error);
+
+          res.status(500).json({
+            message: "Failed to fetch application details.",
+            error: error.message,
+          });
+        }
+      },
+    );
 
     // Existing frontend compatibility is kept here.
     // Later, add verifyToken + verifySeeker after the Apply Job form sends a Bearer token.
