@@ -286,6 +286,249 @@ async function run() {
       };
     };
 
+
+    const PROFILE_URL_FIELDS = [
+      "image",
+      "website",
+      "linkedin",
+      "github",
+      "portfolio",
+      "resumeUrl",
+    ];
+
+    const hasOwnField = (object, field) =>
+      Object.prototype.hasOwnProperty.call(object, field);
+
+    const sanitizeProfileText = (value, maxLength = 200) =>
+      String(value ?? "").trim().slice(0, maxLength);
+
+    const sanitizeProfileList = (
+      value,
+      maxItems = 20,
+      maxItemLength = 60,
+    ) => {
+      const items = Array.isArray(value)
+        ? value
+        : String(value ?? "")
+            .split(",")
+            .map((item) => item.trim());
+
+      return Array.from(
+        new Set(
+          items
+            .map((item) =>
+              String(item ?? "").trim().slice(0, maxItemLength),
+            )
+            .filter(Boolean),
+        ),
+      ).slice(0, maxItems);
+    };
+
+    const normalizeProfileUrl = (value) => {
+      const normalizedValue = String(value ?? "").trim();
+
+      if (!normalizedValue) return "";
+
+      try {
+        const parsedUrl = new URL(normalizedValue);
+
+        if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+          return null;
+        }
+
+        return parsedUrl.toString();
+      } catch {
+        return null;
+      }
+    };
+
+    const buildSafeProfile = (user) => ({
+      _id: user?._id,
+      id: String(user?._id || ""),
+      name: user?.name || "",
+      email: user?.email || "",
+      role: user?.role || "seeker",
+      plan: user?.plan || "seeker_free",
+      image: user?.image || "",
+      headline: user?.headline || "",
+      phone: user?.phone || "",
+      location: user?.location || "",
+      bio: user?.bio || "",
+      skills: Array.isArray(user?.skills) ? user.skills : [],
+      experienceLevel: user?.experienceLevel || "",
+      currentCompany: user?.currentCompany || "",
+      currentPosition: user?.currentPosition || "",
+      education: user?.education || "",
+      website: user?.website || "",
+      linkedin: user?.linkedin || "",
+      github: user?.github || "",
+      portfolio: user?.portfolio || "",
+      resumeUrl: user?.resumeUrl || "",
+      openToWork: Boolean(user?.openToWork),
+      preferredJobTypes: Array.isArray(user?.preferredJobTypes)
+        ? user.preferredJobTypes
+        : [],
+      preferredLocations: Array.isArray(user?.preferredLocations)
+        ? user.preferredLocations
+        : [],
+      createdAt: user?.createdAt || null,
+      updatedAt: user?.updatedAt || null,
+    });
+
+    // authenticated user's profile
+    app.get("/api/profile", verifyToken, async (req, res) => {
+      try {
+        const freshUser = await findUserById(req.user._id);
+
+        if (!freshUser) {
+          return res.status(404).json({
+            message: "Profile was not found.",
+          });
+        }
+
+        res.json({
+          profile: buildSafeProfile(freshUser),
+        });
+      } catch (error) {
+        console.error("Profile fetch error:", error);
+
+        res.status(500).json({
+          message: "Failed to load profile.",
+          error: error.message,
+        });
+      }
+    });
+
+    // authenticated user updates only their own editable profile fields
+    app.patch("/api/profile", verifyToken, async (req, res) => {
+      try {
+        const body = req.body || {};
+        const freshUser = await findUserById(req.user._id);
+
+        if (!freshUser) {
+          return res.status(404).json({
+            message: "Profile was not found.",
+          });
+        }
+
+        const invalidUrlFields = [];
+        const normalizedUrls = {};
+
+        PROFILE_URL_FIELDS.forEach((field) => {
+          if (!hasOwnField(body, field)) return;
+
+          const normalizedUrl = normalizeProfileUrl(body[field]);
+
+          if (normalizedUrl === null) {
+            invalidUrlFields.push(field);
+          } else {
+            normalizedUrls[field] = normalizedUrl;
+          }
+        });
+
+        if (invalidUrlFields.length) {
+          return res.status(400).json({
+            message: `Invalid URL in: ${invalidUrlFields.join(", ")}.`,
+          });
+        }
+
+        const getTextValue = (field, maxLength) =>
+          hasOwnField(body, field)
+            ? sanitizeProfileText(body[field], maxLength)
+            : sanitizeProfileText(freshUser?.[field], maxLength);
+
+        const getListValue = (
+          field,
+          maxItems,
+          maxItemLength,
+        ) =>
+          hasOwnField(body, field)
+            ? sanitizeProfileList(
+                body[field],
+                maxItems,
+                maxItemLength,
+              )
+            : sanitizeProfileList(
+                freshUser?.[field] || [],
+                maxItems,
+                maxItemLength,
+              );
+
+        const update = {
+          name: getTextValue("name", 80),
+          headline: getTextValue("headline", 120),
+          phone: getTextValue("phone", 30),
+          location: getTextValue("location", 120),
+          bio: getTextValue("bio", 1200),
+          experienceLevel: getTextValue(
+            "experienceLevel",
+            60,
+          ),
+          currentCompany: getTextValue(
+            "currentCompany",
+            120,
+          ),
+          currentPosition: getTextValue(
+            "currentPosition",
+            120,
+          ),
+          education: getTextValue("education", 200),
+          skills: getListValue("skills", 20, 50),
+          preferredJobTypes: getListValue(
+            "preferredJobTypes",
+            10,
+            50,
+          ),
+          preferredLocations: getListValue(
+            "preferredLocations",
+            10,
+            80,
+          ),
+          openToWork: hasOwnField(body, "openToWork")
+            ? Boolean(body.openToWork)
+            : Boolean(freshUser?.openToWork),
+          ...normalizedUrls,
+          updatedAt: new Date(),
+        };
+
+        if (!update.name) {
+          return res.status(400).json({
+            message: "Name is required.",
+          });
+        }
+
+        const result = await userCollection.updateOne(
+          {
+            _id: freshUser._id,
+          },
+          {
+            $set: update,
+          },
+        );
+
+        if (!result.matchedCount) {
+          return res.status(404).json({
+            message: "Profile was not found.",
+          });
+        }
+
+        const updatedUser = await findUserById(freshUser._id);
+
+        res.json({
+          success: true,
+          message: "Profile updated successfully.",
+          profile: buildSafeProfile(updatedUser),
+        });
+      } catch (error) {
+        console.error("Profile update error:", error);
+
+        res.status(500).json({
+          message: "Failed to update profile.",
+          error: error.message,
+        });
+      }
+    });
+
     // subscription
     app.post("/api/subscription", async (req, res) => {
       try {
