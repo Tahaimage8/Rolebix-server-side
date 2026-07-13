@@ -1306,6 +1306,534 @@ async function run() {
       }
     });
 
+
+
+    const normalizePaymentStatus = (status) =>
+      String(status || "pending").trim().toLowerCase();
+
+    const buildRevenueByCurrency = (paymentRecords = []) => {
+      const currencyMap = new Map();
+
+      paymentRecords.forEach((payment) => {
+        const currency = String(payment?.currency || "usd")
+          .trim()
+          .toLowerCase();
+
+        const rawAmount = Number(payment?.amountTotal);
+        const amountTotal = Number.isFinite(rawAmount) ? rawAmount : 0;
+
+        const current = currencyMap.get(currency) || {
+          currency,
+          amountTotal: 0,
+          payments: 0,
+        };
+
+        current.amountTotal += amountTotal;
+        current.payments += 1;
+
+        currencyMap.set(currency, current);
+      });
+
+      return Array.from(currencyMap.values()).sort(
+        (first, second) =>
+          second.amountTotal - first.amountTotal,
+      );
+    };
+
+    // =========================================================
+    // ADMIN DASHBOARD
+    // =========================================================
+
+    app.get(
+      "/api/admin/dashboard",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const [
+            totalUsers,
+            totalSeekers,
+            totalRecruiters,
+            totalAdmins,
+            totalJobs,
+            activeJobs,
+            pendingJobs,
+            totalCompanies,
+            approvedCompanies,
+            pendingCompanies,
+            totalApplications,
+            recentJobs,
+            recentPayments,
+            recentUsers,
+            paymentSummaryRecords,
+          ] = await Promise.all([
+            userCollection.countDocuments({}),
+            userCollection.countDocuments({ role: "seeker" }),
+            userCollection.countDocuments({ role: "recruiter" }),
+            userCollection.countDocuments({ role: "admin" }),
+            JobCollection.countDocuments({}),
+            JobCollection.countDocuments({ status: "active" }),
+            JobCollection.countDocuments({
+              $or: [
+                { status: "pending" },
+                { status: { $exists: false } },
+                { status: null },
+                { status: "" },
+              ],
+            }),
+            companyCollection.countDocuments({}),
+            companyCollection.countDocuments({ status: "approved" }),
+            companyCollection.countDocuments({
+              $or: [
+                { status: "pending" },
+                { status: { $exists: false } },
+                { status: null },
+                { status: "" },
+              ],
+            }),
+            applicationCollection.countDocuments({}),
+            JobCollection.find({})
+              .sort({ createdAt: -1 })
+              .limit(5)
+              .toArray(),
+            subscriptionCollection.find({})
+              .sort({ createdAt: -1, updatedAt: -1 })
+              .limit(5)
+              .toArray(),
+            userCollection
+              .find({})
+              .project({
+                name: 1,
+                email: 1,
+                role: 1,
+                image: 1,
+                createdAt: 1,
+              })
+              .sort({ createdAt: -1 })
+              .limit(5)
+              .toArray(),
+            subscriptionCollection
+              .find({})
+              .project({
+                paymentStatus: 1,
+                amountTotal: 1,
+                currency: 1,
+              })
+              .toArray(),
+          ]);
+
+          const totalPayments = paymentSummaryRecords.length;
+
+          const paidPayments = paymentSummaryRecords.filter(
+            (payment) =>
+              ["paid", "complete", "completed", "succeeded"].includes(
+                normalizePaymentStatus(payment?.paymentStatus),
+              ),
+          ).length;
+
+          const revenueByCurrency =
+            buildRevenueByCurrency(paymentSummaryRecords);
+
+          res.json({
+            stats: {
+              totalUsers,
+              totalSeekers,
+              totalRecruiters,
+              totalAdmins,
+              totalJobs,
+              activeJobs,
+              pendingJobs,
+              totalCompanies,
+              approvedCompanies,
+              pendingCompanies,
+              totalApplications,
+              totalPayments,
+              paidPayments,
+            },
+            revenueByCurrency,
+            recentJobs,
+            recentPayments,
+            recentUsers,
+          });
+        } catch (error) {
+          console.error("Admin dashboard fetch error:", error);
+
+          res.status(500).json({
+            message: "Failed to load admin dashboard.",
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // =========================================================
+    // ADMIN JOB MODERATION
+    // =========================================================
+
+    app.get(
+      "/api/admin/jobs",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const page = Math.max(Number(req.query.page) || 1, 1);
+          const limit = Math.min(
+            Math.max(Number(req.query.limit) || 10, 1),
+            50,
+          );
+          const skip = (page - 1) * limit;
+
+          const query = {};
+          const andConditions = [];
+
+          const status = String(req.query.status || "").toLowerCase();
+
+          if (status && status !== "all") {
+            if (status === "unmoderated") {
+              andConditions.push({
+                $or: [
+                  { status: { $exists: false } },
+                  { status: null },
+                  { status: "" },
+                ],
+              });
+            } else {
+              andConditions.push({ status });
+            }
+          }
+
+          const category = String(req.query.category || "");
+
+          if (category && category !== "all") {
+            andConditions.push({ category });
+          }
+
+          const search = String(req.query.search || "").trim();
+
+          if (search) {
+            const safeSearch = search.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              "\\$&",
+            );
+            const searchRegex = new RegExp(safeSearch, "i");
+
+            andConditions.push({
+              $or: [
+                { title: searchRegex },
+                { category: searchRegex },
+                { type: searchRegex },
+                { "company.name": searchRegex },
+                { "location.display": searchRegex },
+                { "location.city": searchRegex },
+              ],
+            });
+          }
+
+          if (andConditions.length) {
+            query.$and = andConditions;
+          }
+
+          const [total, jobs] = await Promise.all([
+            JobCollection.countDocuments(query),
+            JobCollection.find(query)
+              .sort({ createdAt: -1 })
+              .skip(skip)
+              .limit(limit)
+              .toArray(),
+          ]);
+
+          const jobsWithApplicationCount = await Promise.all(
+            jobs.map(async (job) => {
+              const jobIdValues = buildFlexibleIdValues(job._id);
+
+              const applicationCount =
+                await applicationCollection.countDocuments({
+                  $or: [
+                    {
+                      jobId: {
+                        $in: jobIdValues,
+                      },
+                    },
+                    {
+                      "job.id": {
+                        $in: jobIdValues,
+                      },
+                    },
+                    {
+                      "job._id": {
+                        $in: jobIdValues,
+                      },
+                    },
+                  ],
+                });
+
+              return {
+                ...job,
+                status: job.status || "unmoderated",
+                applicationCount,
+              };
+            }),
+          );
+
+          const totalPages = Math.max(1, Math.ceil(total / limit));
+
+          res.json({
+            jobs: jobsWithApplicationCount,
+            pagination: {
+              page,
+              limit,
+              total,
+              totalPages,
+              hasNextPage: page < totalPages,
+              hasPreviousPage: page > 1,
+            },
+          });
+        } catch (error) {
+          console.error("Admin jobs fetch error:", error);
+
+          res.status(500).json({
+            message: "Failed to load admin jobs.",
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    app.patch(
+      "/api/admin/jobs/:id/status",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const status = String(req.body?.status || "").toLowerCase();
+          const moderationNote = String(
+            req.body?.moderationNote || "",
+          ).trim();
+
+          const allowedStatuses = [
+            "active",
+            "pending",
+            "paused",
+            "closed",
+            "rejected",
+          ];
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).json({
+              message: "Invalid job ID.",
+            });
+          }
+
+          if (!allowedStatuses.includes(status)) {
+            return res.status(400).json({
+              message: "Invalid job status.",
+              allowedStatuses,
+            });
+          }
+
+          const now = new Date();
+
+          const result = await JobCollection.updateOne(
+            {
+              _id: new ObjectId(id),
+            },
+            {
+              $set: {
+                status,
+                moderationNote,
+                moderatedAt: now,
+                moderatedBy: String(req.user._id),
+                moderatedByEmail: req.user.email,
+                updatedAt: now,
+              },
+            },
+          );
+
+          if (!result.matchedCount) {
+            return res.status(404).json({
+              message: "Job was not found.",
+            });
+          }
+
+          const job = await JobCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          res.json({
+            success: true,
+            message: "Job status updated successfully.",
+            job,
+          });
+        } catch (error) {
+          console.error("Admin job status update error:", error);
+
+          res.status(500).json({
+            message: "Failed to update job status.",
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // =========================================================
+    // ADMIN PAYMENT HISTORY
+    // =========================================================
+
+    app.get(
+      "/api/admin/payments",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const page = Math.max(Number(req.query.page) || 1, 1);
+          const limit = Math.min(
+            Math.max(Number(req.query.limit) || 10, 1),
+            50,
+          );
+          const skip = (page - 1) * limit;
+
+          const andConditions = [];
+
+          const requestedStatus = String(
+            req.query.paymentStatus || "",
+          )
+            .trim()
+            .toLowerCase();
+
+          if (requestedStatus && requestedStatus !== "all") {
+            andConditions.push({
+              paymentStatus: {
+                $regex: `^${requestedStatus.replace(
+                  /[.*+?^${}()|[\]\\]/g,
+                  "\\$&",
+                )}$`,
+                $options: "i",
+              },
+            });
+          }
+
+          const requestedPlanId = String(req.query.planId || "").trim();
+
+          if (requestedPlanId && requestedPlanId !== "all") {
+            andConditions.push({
+              planId: requestedPlanId,
+            });
+          }
+
+          const search = String(req.query.search || "").trim();
+
+          if (search) {
+            const safeSearch = search.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              "\\$&",
+            );
+            const searchRegex = new RegExp(safeSearch, "i");
+
+            andConditions.push({
+              $or: [
+                { email: searchRegex },
+                { planId: searchRegex },
+                { planName: searchRegex },
+                { stripeSessionId: searchRegex },
+                { stripeCustomerId: searchRegex },
+                { stripeSubscriptionId: searchRegex },
+              ],
+            });
+          }
+
+          const query = andConditions.length
+            ? { $and: andConditions }
+            : {};
+
+          const [
+            total,
+            payments,
+            paymentSummaryRecords,
+          ] = await Promise.all([
+            subscriptionCollection.countDocuments(query),
+            subscriptionCollection
+              .find(query)
+              .sort({ createdAt: -1, updatedAt: -1 })
+              .skip(skip)
+              .limit(limit)
+              .toArray(),
+            subscriptionCollection
+              .find({})
+              .project({
+                paymentStatus: 1,
+                amountTotal: 1,
+                currency: 1,
+                planId: 1,
+              })
+              .toArray(),
+          ]);
+
+          const totalPayments = paymentSummaryRecords.length;
+
+          const paidPayments = paymentSummaryRecords.filter(
+            (payment) =>
+              ["paid", "complete", "completed", "succeeded"].includes(
+                normalizePaymentStatus(payment?.paymentStatus),
+              ),
+          ).length;
+
+          const pendingPayments = paymentSummaryRecords.filter(
+            (payment) => {
+              const status = normalizePaymentStatus(
+                payment?.paymentStatus,
+              );
+
+              return !status || status === "pending";
+            },
+          ).length;
+
+          const revenueByCurrency =
+            buildRevenueByCurrency(paymentSummaryRecords);
+
+          const planIds = Array.from(
+            new Set(
+              paymentSummaryRecords
+                .map((payment) =>
+                  String(payment?.planId || "").trim(),
+                )
+                .filter(Boolean),
+            ),
+          ).sort((first, second) =>
+            first.localeCompare(second),
+          );
+
+          const totalPages = Math.max(1, Math.ceil(total / limit));
+
+          res.json({
+            payments,
+            planIds,
+            summary: {
+              totalPayments,
+              paidPayments,
+              pendingPayments,
+              revenueByCurrency,
+            },
+            pagination: {
+              page,
+              limit,
+              total,
+              totalPages,
+              hasNextPage: page < totalPages,
+              hasPreviousPage: page > 1,
+            },
+          });
+        } catch (error) {
+          console.error("Admin payments fetch error:", error);
+
+          res.status(500).json({
+            message: "Failed to load payment history.",
+            error: error.message,
+          });
+        }
+      },
+    );
+
     // stats
     app.get("/api/stats", async (req, res) => {
       try {
