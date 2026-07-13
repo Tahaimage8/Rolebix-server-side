@@ -42,44 +42,55 @@ async function run() {
     const subscriptionCollection = db.collection("subscription");
     const sessionCollection = db.collection("session");
 
+
     // verification related
+    const findUserById = async (userId) => {
+      if (!userId) return null;
+
+      const possibleIds = [userId];
+
+      if (ObjectId.isValid(String(userId))) {
+        possibleIds.push(new ObjectId(String(userId)));
+      }
+
+      return userCollection.findOne({
+        $or: possibleIds.map((id) => ({ _id: id })),
+      });
+    };
+
     const verifyToken = async (req, res, next) => {
       try {
-        const authHeader = req.headers?.authorization;
+        const authHeader = req.headers?.authorization || "";
+        const [scheme, token] = authHeader.split(" ");
 
-        if (!authHeader) {
-          return res.status(401).send({
-            message: "unauthorized access",
+        if (scheme !== "Bearer" || !token) {
+          return res.status(401).json({
+            message: "Unauthorized access.",
           });
         }
 
-        const token = authHeader.split(" ")[1];
-
-        if (!token) {
-          return res.status(401).send({
-            message: "unauthorized access",
-          });
-        }
-
-        const session = await sessionCollection.findOne({
-          token,
-        });
+        const session = await sessionCollection.findOne({ token });
 
         if (!session) {
-          return res.status(401).send({
-            message: "unauthorized access",
+          return res.status(401).json({
+            message: "Invalid or expired session.",
           });
         }
 
-        const userId = session?.userId;
+        if (
+          session.expiresAt &&
+          new Date(session.expiresAt).getTime() < Date.now()
+        ) {
+          return res.status(401).json({
+            message: "Session expired.",
+          });
+        }
 
-        const user = await userCollection.findOne({
-          _id: userId,
-        });
+        const user = await findUserById(session.userId);
 
         if (!user) {
-          return res.status(401).send({
-            message: "unauthorized access",
+          return res.status(401).json({
+            message: "Session user was not found.",
           });
         }
 
@@ -115,6 +126,82 @@ async function run() {
       }
 
       next();
+    };
+
+
+    const verifyRecruiter = async (req, res, next) => {
+      if (req.user?.role !== "recruiter") {
+        return res.status(403).json({
+          message: "Recruiter access required.",
+        });
+      }
+
+      next();
+    };
+
+    const APPLICATION_STATUSES = [
+      "applied",
+      "reviewing",
+      "shortlisted",
+      "interview",
+      "hired",
+      "rejected",
+    ];
+
+    const normalizeApplicationStatus = (status) => {
+      const value = String(status || "applied").toLowerCase();
+
+      if (value === "new") return "applied";
+      if (value === "interviewing") return "interview";
+
+      return APPLICATION_STATUSES.includes(value) ? value : "applied";
+    };
+
+    const buildFlexibleIdValues = (value) => {
+      if (!value) return [];
+
+      const values = [String(value)];
+
+      if (ObjectId.isValid(String(value))) {
+        values.push(new ObjectId(String(value)));
+      }
+
+      return values;
+    };
+
+    const getRecruiterCompany = async (user) => {
+      const recruiterId = String(user?._id || "");
+
+      const orConditions = [
+        { recruiterId },
+        { recruiterEmail: user?.email },
+        { ownerEmail: user?.email },
+      ].filter((condition) => {
+        const value = Object.values(condition)[0];
+        return Boolean(value);
+      });
+
+      if (ObjectId.isValid(recruiterId)) {
+        orConditions.push({
+          recruiterId: new ObjectId(recruiterId),
+        });
+      }
+
+      if (!orConditions.length) return null;
+
+      return companyCollection.findOne({
+        $or: orConditions,
+      });
+    };
+
+    const findJobByAnyId = async (jobId) => {
+      if (!jobId) return null;
+
+      const possibleIds = buildFlexibleIdValues(jobId);
+
+      return JobCollection.findOne({
+        $or: possibleIds.map((id) => ({ _id: id })),
+      });
     };
 
     // subscription
@@ -235,28 +322,49 @@ async function run() {
       }
     });
 
-    // applications
+
+    // applications: seeker list
     app.get("/api/applications", verifyToken, verifySeeker, async (req, res) => {
       try {
-        const query = {};
+        const ownApplicantId = String(req.user._id);
 
-        if (req.query.applicantId) {
-          query.applicantId = req.query.applicantId;
-
-          if (req.user._id.toString() !== req.query.applicantId) {
-            return res.status(403).send({
-              message: "forbidden",
-            });
-          }
+        if (
+          req.query.applicantId &&
+          String(req.query.applicantId) !== ownApplicantId
+        ) {
+          return res.status(403).json({
+            message: "You can only view your own applications.",
+          });
         }
+
+        const applicantIds = buildFlexibleIdValues(ownApplicantId);
+
+        const query = {
+          $or: [
+            ...applicantIds.map((id) => ({ applicantId: id })),
+            { applicantEmail: req.user.email },
+            { email: req.user.email },
+            { "applicant.email": req.user.email },
+          ],
+        };
 
         if (req.query.jobId) {
-          query.jobId = req.query.jobId;
+          query.jobId = {
+            $in: buildFlexibleIdValues(req.query.jobId),
+          };
         }
 
-        const result = await applicationCollection.find(query).toArray();
+        const result = await applicationCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
 
-        res.json(result);
+        res.json(
+          result.map((application) => ({
+            ...application,
+            status: normalizeApplicationStatus(application.status),
+          })),
+        );
       } catch (error) {
         console.error("Applications fetch error:", error);
 
@@ -267,18 +375,111 @@ async function run() {
       }
     });
 
+    // Existing frontend compatibility is kept here.
+    // Later, add verifyToken + verifySeeker after the Apply Job form sends a Bearer token.
     app.post("/api/applications", async (req, res) => {
       try {
-        const application = req.body;
+        const application = req.body || {};
+        const applicantId =
+          application.applicantId ||
+          application.userId ||
+          application.applicant?._id ||
+          application.applicant?.id;
+        const jobId =
+          application.jobId ||
+          application.job?._id ||
+          application.job?.id;
+
+        if (!applicantId) {
+          return res.status(400).json({
+            message: "Applicant ID is required.",
+          });
+        }
+
+        if (!jobId || !ObjectId.isValid(String(jobId))) {
+          return res.status(400).json({
+            message: "A valid job ID is required.",
+          });
+        }
+
+        const job = await JobCollection.findOne({
+          _id: new ObjectId(String(jobId)),
+        });
+
+        if (!job) {
+          return res.status(404).json({
+            message: "Job not found.",
+          });
+        }
+
+        const duplicateApplication = await applicationCollection.findOne({
+          jobId: {
+            $in: buildFlexibleIdValues(jobId),
+          },
+          applicantId: {
+            $in: buildFlexibleIdValues(applicantId),
+          },
+        });
+
+        if (duplicateApplication) {
+          return res.status(409).json({
+            message: "You have already applied for this job.",
+          });
+        }
+
+        const now = new Date();
 
         const newApplication = {
           ...application,
-          createdAt: new Date(),
+          applicantId: String(applicantId),
+          jobId: String(jobId),
+          applicantName:
+            application.applicantName ||
+            application.candidateName ||
+            application.name ||
+            application.applicant?.name ||
+            "",
+          applicantEmail:
+            application.applicantEmail ||
+            application.email ||
+            application.applicant?.email ||
+            "",
+          jobTitle:
+            application.jobTitle ||
+            application.position ||
+            job.title ||
+            "",
+          companyId:
+            application.companyId ||
+            job.company?.id ||
+            "",
+          companyName:
+            application.companyName ||
+            job.company?.name ||
+            "",
+          status: "applied",
+          statusHistory: [
+            {
+              status: "applied",
+              changedAt: now,
+              changedBy: String(applicantId),
+            },
+          ],
+          createdAt: now,
+          updatedAt: now,
         };
 
         const result = await applicationCollection.insertOne(newApplication);
 
-        res.send(result);
+        res.status(201).json({
+          success: true,
+          message: "Application submitted successfully.",
+          insertedId: result.insertedId,
+          application: {
+            ...newApplication,
+            _id: result.insertedId,
+          },
+        });
       } catch (error) {
         console.error("Application create error:", error);
 
@@ -288,6 +489,421 @@ async function run() {
         });
       }
     });
+
+    // recruiter applications list
+    app.get(
+      "/api/recruiter/applications",
+      verifyToken,
+      verifyRecruiter,
+      async (req, res) => {
+        try {
+          const company = await getRecruiterCompany(req.user);
+
+          if (!company) {
+            return res.json({
+              applications: [],
+              jobs: [],
+              company: null,
+              stats: {
+                total: 0,
+                applied: 0,
+                reviewing: 0,
+                shortlisted: 0,
+                interview: 0,
+                hired: 0,
+                rejected: 0,
+              },
+              pagination: {
+                page: 1,
+                limit: 20,
+                total: 0,
+                totalPages: 1,
+                hasNextPage: false,
+                hasPreviousPage: false,
+              },
+            });
+          }
+
+          const companyId = company._id.toString();
+
+          const companyJobs = await JobCollection.find({
+            $or: [
+              { "company.id": companyId },
+              { companyId },
+              { "company._id": company._id },
+            ],
+          })
+            .project({
+              title: 1,
+              status: 1,
+              company: 1,
+              createdAt: 1,
+            })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+          const jobIdValues = companyJobs.flatMap((job) =>
+            buildFlexibleIdValues(job._id),
+          );
+
+          if (!jobIdValues.length) {
+            return res.json({
+              applications: [],
+              jobs: companyJobs,
+              company,
+              stats: {
+                total: 0,
+                applied: 0,
+                reviewing: 0,
+                shortlisted: 0,
+                interview: 0,
+                hired: 0,
+                rejected: 0,
+              },
+              pagination: {
+                page: 1,
+                limit: 20,
+                total: 0,
+                totalPages: 1,
+                hasNextPage: false,
+                hasPreviousPage: false,
+              },
+            });
+          }
+
+          const rawApplications = await applicationCollection
+            .find({
+              $or: [
+                { jobId: { $in: jobIdValues } },
+                { "job.id": { $in: jobIdValues } },
+                { "job._id": { $in: jobIdValues } },
+              ],
+            })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+          const applicantIdValues = rawApplications.flatMap((application) =>
+            buildFlexibleIdValues(
+              application.applicantId ||
+                application.userId ||
+                application.applicant?._id ||
+                application.applicant?.id,
+            ),
+          );
+
+          const applicantEmails = rawApplications
+            .map(
+              (application) =>
+                application.applicantEmail ||
+                application.email ||
+                application.applicant?.email,
+            )
+            .filter(Boolean);
+
+          const userOrConditions = [];
+
+          if (applicantIdValues.length) {
+            userOrConditions.push({
+              _id: { $in: applicantIdValues },
+            });
+          }
+
+          if (applicantEmails.length) {
+            userOrConditions.push({
+              email: { $in: applicantEmails },
+            });
+          }
+
+          const applicants = userOrConditions.length
+            ? await userCollection
+                .find({
+                  $or: userOrConditions,
+                })
+                .project({
+                  name: 1,
+                  email: 1,
+                  image: 1,
+                  phone: 1,
+                })
+                .toArray()
+            : [];
+
+          const applicantById = new Map();
+          const applicantByEmail = new Map();
+
+          applicants.forEach((applicant) => {
+            applicantById.set(String(applicant._id), applicant);
+            applicantByEmail.set(String(applicant.email || "").toLowerCase(), applicant);
+          });
+
+          const jobMap = new Map(
+            companyJobs.map((job) => [String(job._id), job]),
+          );
+
+          const enrichedApplications = rawApplications.map((application) => {
+            const applicantId = String(
+              application.applicantId ||
+                application.userId ||
+                application.applicant?._id ||
+                application.applicant?.id ||
+                "",
+            );
+
+            const applicantEmail = String(
+              application.applicantEmail ||
+                application.email ||
+                application.applicant?.email ||
+                "",
+            ).toLowerCase();
+
+            const jobId = String(
+              application.jobId ||
+                application.job?._id ||
+                application.job?.id ||
+                "",
+            );
+
+            const databaseApplicant =
+              applicantById.get(applicantId) ||
+              applicantByEmail.get(applicantEmail);
+
+            const applicant = databaseApplicant || {
+              _id: applicantId || null,
+              name:
+                application.applicantName ||
+                application.candidateName ||
+                application.name ||
+                application.applicant?.name ||
+                "Unnamed candidate",
+              email:
+                application.applicantEmail ||
+                application.email ||
+                application.applicant?.email ||
+                "No email",
+              image:
+                application.applicantImage ||
+                application.applicant?.image ||
+                null,
+              phone:
+                application.phone ||
+                application.applicant?.phone ||
+                null,
+            };
+
+            const job = jobMap.get(jobId) || {
+              _id: jobId || null,
+              title:
+                application.jobTitle ||
+                application.position ||
+                application.job?.title ||
+                "Untitled job",
+            };
+
+            return {
+              ...application,
+              status: normalizeApplicationStatus(application.status),
+              applicant,
+              job,
+            };
+          });
+
+          const stats = {
+            total: enrichedApplications.length,
+            applied: 0,
+            reviewing: 0,
+            shortlisted: 0,
+            interview: 0,
+            hired: 0,
+            rejected: 0,
+          };
+
+          enrichedApplications.forEach((application) => {
+            const status = normalizeApplicationStatus(application.status);
+            stats[status] += 1;
+          });
+
+          const statusFilter = String(req.query.status || "").toLowerCase();
+          const jobIdFilter = String(req.query.jobId || "");
+          const searchFilter = String(req.query.search || "")
+            .trim()
+            .toLowerCase();
+
+          let filteredApplications = enrichedApplications;
+
+          if (statusFilter && statusFilter !== "all") {
+            filteredApplications = filteredApplications.filter(
+              (application) =>
+                normalizeApplicationStatus(application.status) === statusFilter,
+            );
+          }
+
+          if (jobIdFilter && jobIdFilter !== "all") {
+            filteredApplications = filteredApplications.filter(
+              (application) => String(application.job?._id || "") === jobIdFilter,
+            );
+          }
+
+          if (searchFilter) {
+            filteredApplications = filteredApplications.filter((application) => {
+              const searchableText = [
+                application.applicant?.name,
+                application.applicant?.email,
+                application.applicant?.phone,
+                application.job?.title,
+                Array.isArray(application.skills)
+                  ? application.skills.join(" ")
+                  : application.skills,
+              ]
+                .filter(Boolean)
+                .join(" ")
+                .toLowerCase();
+
+              return searchableText.includes(searchFilter);
+            });
+          }
+
+          const page = Math.max(Number(req.query.page) || 1, 1);
+          const limit = Math.min(
+            Math.max(Number(req.query.limit) || 20, 1),
+            100,
+          );
+          const total = filteredApplications.length;
+          const totalPages = Math.max(1, Math.ceil(total / limit));
+          const skip = (page - 1) * limit;
+
+          res.json({
+            applications: filteredApplications.slice(skip, skip + limit),
+            jobs: companyJobs,
+            company,
+            stats,
+            pagination: {
+              page,
+              limit,
+              total,
+              totalPages,
+              hasNextPage: page < totalPages,
+              hasPreviousPage: page > 1,
+            },
+          });
+        } catch (error) {
+          console.error("Recruiter applications fetch error:", error);
+
+          res.status(500).json({
+            message: "Failed to fetch recruiter applications.",
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // recruiter application status update
+    app.patch(
+      "/api/applications/:id/status",
+      verifyToken,
+      verifyRecruiter,
+      async (req, res) => {
+        try {
+          const applicationId = req.params.id;
+          const requestedStatus = String(req.body?.status || "").toLowerCase();
+
+          if (!ObjectId.isValid(applicationId)) {
+            return res.status(400).json({
+              message: "Invalid application ID.",
+            });
+          }
+
+          if (!APPLICATION_STATUSES.includes(requestedStatus)) {
+            return res.status(400).json({
+              message: "Invalid application status.",
+              allowedStatuses: APPLICATION_STATUSES,
+            });
+          }
+
+          const company = await getRecruiterCompany(req.user);
+
+          if (!company) {
+            return res.status(404).json({
+              message: "Recruiter company was not found.",
+            });
+          }
+
+          const application = await applicationCollection.findOne({
+            _id: new ObjectId(applicationId),
+          });
+
+          if (!application) {
+            return res.status(404).json({
+              message: "Application was not found.",
+            });
+          }
+
+          const jobId =
+            application.jobId ||
+            application.job?._id ||
+            application.job?.id;
+
+          const job = await findJobByAnyId(jobId);
+
+          if (!job) {
+            return res.status(404).json({
+              message: "The related job was not found.",
+            });
+          }
+
+          const jobCompanyId = String(
+            job.company?.id ||
+              job.companyId ||
+              job.company?._id ||
+              "",
+          );
+
+          if (jobCompanyId !== company._id.toString()) {
+            return res.status(403).json({
+              message: "You cannot manage this application.",
+            });
+          }
+
+          const now = new Date();
+
+          await applicationCollection.updateOne(
+            {
+              _id: new ObjectId(applicationId),
+            },
+            {
+              $set: {
+                status: requestedStatus,
+                updatedAt: now,
+              },
+              $push: {
+                statusHistory: {
+                  status: requestedStatus,
+                  changedAt: now,
+                  changedBy: String(req.user._id),
+                  changedByEmail: req.user.email,
+                },
+              },
+            },
+          );
+
+          const updatedApplication = await applicationCollection.findOne({
+            _id: new ObjectId(applicationId),
+          });
+
+          res.json({
+            success: true,
+            message: "Application status updated successfully.",
+            application: updatedApplication,
+          });
+        } catch (error) {
+          console.error("Application status update error:", error);
+
+          res.status(500).json({
+            message: "Failed to update application status.",
+            error: error.message,
+          });
+        }
+      },
+    );
 
     // jobs with pagination
     app.get("/api/jobs", async (req, res) => {
